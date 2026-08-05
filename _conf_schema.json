@@ -1,0 +1,32 @@
+{
+  "enable": {
+    "description": "是否启用智能静默",
+    "type": "bool",
+    "default": true
+  },
+  "only_group": {
+    "description": "仅群聊生效（私聊不拦截）",
+    "type": "bool",
+    "default": true
+  },
+  "silence_prefix": {
+    "description": "静默特殊前缀，LLM 回复以该前缀开头时将被拦截",
+    "type": "string",
+    "default": "@silent"
+  },
+  "force_reply_on_wake": {
+    "description": "被 @ 或被唤醒时强制回复，静默逻辑不生效",
+    "type": "bool",
+    "default": true
+  },
+  "inject_prompt": {
+    "description": "是否向系统提示词注入静默判断指令",
+    "type": "bool",
+    "default": true
+  },
+  "custom_instruction": {
+    "description": "自定义注入的系统提示词指令（留空使用默认指令）",
+    "type": "string",
+    "default": ""
+  }
+}
