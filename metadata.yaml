@@ -1,7 +1,7 @@
 name: astrbot_plugin_smart_silence
 display_name: 智能静默
 desc: 让 LLM 根据上下文决定是否发言，避免机器人频繁回复刷屏
-help: 无需手动指令，插件自动启用。可在插件配置中调整静默前缀、作用范围等
-version: 1.0.0
+help: 无需手动指令，插件自动启用。/静默 状态 查看统计；/静默 暂停 [N] 临时暂停 N 分钟；/静默 恢复 恢复
+version: 1.6.0
 author: Administrator
 repo: https://github.com/yunxiao258/astrbot_plugin_smart_silence

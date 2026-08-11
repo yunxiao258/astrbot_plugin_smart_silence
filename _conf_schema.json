@@ -25,7 +25,42 @@
     "default": true
   },
   "custom_instruction": {
-    "description": "自定义注入的系统提示词指令（留空使用默认指令）",
+    "description": "自定义注入的系统提示词指令（留空使用默认指令，支持 {prefix} 占位符）",
+    "type": "string",
+    "default": ""
+  },
+  "reply_always_groups": {
+    "description": "白名单群 ID（必回复，静默不生效），多个用英文逗号分隔，如 123456,789012",
+    "type": "string",
+    "default": ""
+  },
+  "silence_always_groups": {
+    "description": "黑名单群 ID（严格静默，未@一律不回复），多个用英文逗号分隔",
+    "type": "string",
+    "default": ""
+  },
+  "hard_block_unmentioned": {
+    "description": "硬阻止：未@机器人且消息未点名机器人时，直接阻止 LLM 调用（完全不回复）",
+    "type": "bool",
+    "default": true
+  },
+  "bot_names": {
+    "description": "机器人名字（用于点名检测），多个用英文逗号分隔，如 云晓,小云",
+    "type": "string",
+    "default": ""
+  },
+  "bot_accounts": {
+    "description": "本实例其他机器人账号 QQ（消息来自这些账号时按机器人规则处理），多个用英文逗号分隔",
+    "type": "string",
+    "default": ""
+  },
+  "bot_message_rule": {
+    "description": "机器人消息规则文案（留空使用默认文案，支持 {prefix} 和 {bot_name} 变量），注入告知 LLM 这是机器人消息",
+    "type": "string",
+    "default": ""
+  },
+  "per_bot_config": {
+    "description": "多机器人独立配置（JSON），键为机器人 self_id，值为可覆盖项，如 {\"10001\":{\"bot_names\":\"云晓\",\"silence_always_groups\":\"777\"}}",
     "type": "string",
     "default": ""
   }

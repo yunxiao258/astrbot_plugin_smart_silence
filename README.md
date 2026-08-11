@@ -2,6 +2,8 @@
 
 让 LLM 根据上下文决定是否发言，避免机器人频繁回复、刷屏或过多地引用消息。
 
+版本：1.6.0
+
 ## 工作原理
 
 插件通过三个事件钩子协同工作：
@@ -25,9 +27,82 @@
 | `silence_prefix` | 静默特殊前缀 | `@silent` |
 | `force_reply_on_wake` | 被 @ 或被唤醒时强制回复 | `true` |
 | `inject_prompt` | 是否注入系统提示词指令 | `true` |
-| `custom_instruction` | 自定义注入指令（留空用默认） | `""` |
+| `custom_instruction` | 自定义注入指令（留空用默认，支持 `{prefix}` 占位符） | `""` |
+| `reply_always_groups` | 白名单群 ID（必回复，静默不生效），逗号分隔 | `""` |
+| `silence_always_groups` | 黑名单群 ID（严格静默，未 @ 一律不回复），逗号分隔 | `""` |
+| `hard_block_unmentioned` | 硬阻止：未 @ 且未点名时直接阻止 LLM 调用（完全不回复） | `true` |
+| `bot_names` | 机器人名字（用于点名检测），逗号分隔，如 `云晓,小云` | `""` |
+| `bot_accounts` | 本实例其他机器人账号 QQ（消息来自这些账号时按机器人规则处理），逗号分隔 | `""` |
+| `bot_message_rule` | 机器人消息规则文案（留空用默认，支持 `{prefix}`、`{bot_name}` 变量） | `""` |
+| `per_bot_config` | 多机器人独立配置（JSON），键为机器人 self_id，值覆盖任意上述项 | `""` |
+
+## 状态命令
+
+发送 `/静默 状态` 可查看插件运行状态与拦截统计：
+启用状态、静默前缀、白名单/黑名单群数量、暂停状态、累计/今日拦截次数、近 7 天拦截趋势、拦截次数 Top 群。
+统计按群、按天累计并持久化到插件目录下的 `stats.json`。
+
+**临时暂停**（管理员）：
+- `/静默 暂停`：暂停 30 分钟，期间不阻止、不拦截、不注入（等价于白名单行为）；
+- `/静默 暂停 120`：暂停 120 分钟；
+- `/静默 恢复`：立即恢复。
+- 暂停状态持久化，AstrBot 重启后仍在暂停期内则继续生效，到期自动恢复。
+
+## 群策略
+
+- **白名单群**（`reply_always_groups`）：必回复，静默逻辑完全失效（不注入指令、不检测、不拦截）。
+- **黑名单群**（`silence_always_groups`）：严格静默，未 @ 机器人时一律阻止 LLM 调用（即使点名也不回复）。
+- 同一群同时配置时，白名单（必回复）优先。
+
+## 未点名硬阻止
+
+开启 `hard_block_unmentioned`（默认开启）后，群聊中满足以下条件的消息会**直接阻止 LLM 调用**，机器人完全不回复（完全静默，仅记入拦截统计）：
+
+- 未 @ 机器人 / 未 @ 全体 / 未引用机器人消息 / 未以唤醒前缀开头；
+- 且消息文本中不含 `bot_names` 中配置的机器人名字（点名但未 @ 的消息会放行，由 LLM 严格判断是否回复）。
+
+若未配置 `bot_names`，则任何未 @ 的群消息都不会触发 LLM。关闭该配置后回退为"仅提示词克制"模式。
+
+## 其他机器人消息
+
+在 `bot_accounts` 中填写本实例其他机器人的 QQ 号后，来自这些账号的消息会被**特殊对待**：
+不参与"未点名硬阻止"，而是注入专属规则（`bot_message_rule`，留空使用内置默认文案）告知 LLM：
+"本条消息来自另一个机器人账号，仅在对方明确提出需要你的帮助时才回复，否则输出静默前缀"。
+
+规则文案支持变量：`{prefix}`（静默前缀）、`{bot_name}`（当前机器人的第一个名字）。
+机器人消息在黑白名单群中仍受群策略约束（黑名单未 @ 一律阻止，白名单必回复）。
+
+## 多机器人独立配置（per_bot_config）
+
+一个 AstrBot 实例挂多个机器人账号时，可通过 `per_bot_config`（JSON 字符串）为每个机器人单独覆盖任意配置项，
+未覆盖的项回退到全局配置：
+
+```json
+{
+  "10001": {"bot_names": "云晓", "silence_always_groups": "777", "hard_block_unmentioned": true},
+  "10002": {"bot_names": "小云", "enable": false, "bot_accounts": "10001,10003,10004"},
+  "10003": {"reply_always_groups": "999"}
+}
+```
+
+可覆盖的键：`enable`、`only_group`、`silence_prefix`、`force_reply_on_wake`、`inject_prompt`、
+`custom_instruction`、`reply_always_groups`、`silence_always_groups`、`hard_block_unmentioned`、
+`bot_names`、`bot_accounts`、`bot_message_rule`。
+`/静默 状态` 会显示当前机器人（self_id）的生效配置。
 
 ## 注意事项
 
-- **流式输出限制**：若开启 LLM 流式输出（streaming），消息会边生成边发送，发送前拦截可能失效。建议关闭流式输出以获取稳定的静默效果。
+- **流式输出兜底**：即使开启 LLM 流式输出（streaming）导致 `on_llm_response` 无法检测，
+  发送前兜底钩子也会直接识别静默前缀/静默表达并拦截（被 @ 时剥离前缀后发送）。
+- **重复注入防护**：系统提示词已注入过一次静默规则时不会重复注入。
+- **自定义指令占位符**：`custom_instruction` 中可使用 `{prefix}` 占位符，会被替换为实际静默前缀。
+- **纯装饰文本**：回复仅为“……”、“～”等装饰符号、无实质内容时，同样视为静默。
 - 本插件需要与开启 LLM 对话的 AstrBot 一起使用（即机器人会主动回复群聊消息时）。
+
+## 测试
+
+插件目录下使用 AstrBot 自带 Python 环境运行单元测试：
+
+```
+D:\uv-tools\astrbot\Scripts\python.exe -m unittest test_smart_silence -v
+```

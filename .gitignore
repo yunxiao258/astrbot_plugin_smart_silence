@@ -8,6 +8,9 @@ data/
 *.log
 .env
 
+# 运行时统计文件（本地数据，不上传）
+stats.json
+
 # 编辑器
 .vscode/
 .idea/
