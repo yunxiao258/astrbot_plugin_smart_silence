@@ -125,6 +125,9 @@ def make_plugin(**overrides):
     cfg = dict(CONF)
     cfg.update(overrides)
     plugin = SmartSilencePlugin(context=None, config=cfg)
+    # 隔离统计：重置为全新状态，避免读取到真实运行产生的 stats.json
+    plugin.stats = {"total": 0, "today": 0, "date": "", "days": {}, "groups": {}}
+    plugin.pause_until = None
     # 使用临时统计文件，避免污染真实 stats.json
     plugin.stats_path = os.path.join(
         tempfile.gettempdir(), "test_smart_silence_stats.json"
@@ -599,6 +602,39 @@ class TestHardBlock(unittest.TestCase):
         run(plugin.inject_instruction(event, req))
         self.assertEqual(plugin.stats["total"], 1)
         self.assertEqual(plugin.stats["groups"].get("101"), 1)
+
+    def test_pseudo_wake_not_stopped(self):
+        """被 llm_enhancement 等标记为唤醒（伪唤醒）的消息放行并注入 strict"""
+        plugin = make_plugin()
+        req = self.FakeReq()
+        event = FakeEvent(
+            message_str="帮我总结一下", group_id="101", at_o_wake=True
+        )
+        run(plugin.inject_instruction(event, req))
+        self.assertFalse(event.stopped)
+        self.assertIn(INJECT_MARKER, req.system_prompt)
+        self.assertIn("特别注意", req.system_prompt)
+
+    def test_pseudo_wake_still_stopped_in_blacklist(self):
+        """黑名单群：伪唤醒消息也一律阻止"""
+        plugin = make_plugin(silence_always_groups="777")
+        req = self.FakeReq()
+        event = FakeEvent(
+            message_str="帮我总结一下", group_id="777", at_o_wake=True
+        )
+        run(plugin.inject_instruction(event, req))
+        self.assertTrue(event.stopped)
+
+    def test_pseudo_wake_not_stopped_when_hard_block_off(self):
+        """hard_block 关闭时伪唤醒消息放行注入"""
+        plugin = make_plugin(hard_block_unmentioned=False)
+        req = self.FakeReq()
+        event = FakeEvent(
+            message_str="帮我总结一下", group_id="101", at_o_wake=True
+        )
+        run(plugin.inject_instruction(event, req))
+        self.assertFalse(event.stopped)
+        self.assertIn(INJECT_MARKER, req.system_prompt)
 
 
 class TestBotMessage(unittest.TestCase):

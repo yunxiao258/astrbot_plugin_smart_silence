@@ -557,8 +557,16 @@ class SmartSilencePlugin(Star):
                 # 黑名单群（严格静默）：未 @ 一律阻止，无论谁发的
                 self._stop_request(event)
                 return
+            # 被其他插件明确标记为唤醒（伪唤醒，如提及/相关/指令触发词）时
+            # 不硬阻止，交给 LLM 按 strict 指令克制判断，避免误伤指令类消息
+            pseudo_wake = bool(getattr(event, "is_at_or_wake_command", False))
             # 机器人消息跳过“未点名硬阻止”，交给 LLM 按机器人规则判断
-            if not is_bot_msg and hard_block and not self._is_named(event):
+            if (
+                not is_bot_msg
+                and not pseudo_wake
+                and hard_block
+                and not self._is_named(event)
+            ):
                 self._stop_request(event)
                 return
 
