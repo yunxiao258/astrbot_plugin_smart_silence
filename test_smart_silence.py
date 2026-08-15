@@ -54,6 +54,7 @@ class FakeEvent:
         group_id="",
         is_admin=True,
         sender_id="",
+        message_obj=None,
     ):
         self._private = private
         self.messages = messages or []
@@ -64,6 +65,7 @@ class FakeEvent:
         self.is_admin = is_admin
         self.sender_id = sender_id
         self.extra = {}
+        self.message_obj = message_obj
         self.result = FakeResult(chain) if chain is not None else None
         self.result_chain = None
         self.cleared = False
@@ -328,6 +330,32 @@ class TestInjectInstruction(unittest.TestCase):
         event = FakeEvent(messages=[At(qq="12345")])
         run(plugin.inject_instruction(event, req))
         self.assertEqual(req.system_prompt, "原始提示词")
+
+    def test_slash_command_stripped_still_real_wake(self):
+        """waking_check 剥离 / 前缀后（message_str="天气 北京"），
+        message_obj.message_str 保留原始 "/天气 北京"，仍应判定为真唤醒"""
+        from types import SimpleNamespace
+
+        plugin = make_plugin()
+        event = FakeEvent(
+            message_str="天气 北京",
+            message_obj=SimpleNamespace(message_str="/天气 北京"),
+        )
+        self.assertTrue(plugin._is_real_wake(event))
+
+    def test_slash_command_no_inject(self):
+        """带 / 前缀的真实指令：不注入静默指令（修复 /指令 被误屏蔽）"""
+        from types import SimpleNamespace
+
+        plugin = make_plugin()
+        req = self.FakeReq()
+        event = FakeEvent(
+            message_str="天气 北京",
+            message_obj=SimpleNamespace(message_str="/天气 北京"),
+        )
+        run(plugin.inject_instruction(event, req))
+        self.assertEqual(req.system_prompt, "原始提示词")
+        self.assertNotIn(INJECT_MARKER, req.system_prompt)
 
     def test_custom_instruction_prefix_placeholder(self):
         plugin = make_plugin(

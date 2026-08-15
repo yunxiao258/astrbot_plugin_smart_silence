@@ -507,10 +507,19 @@ class SmartSilencePlugin(Star):
                 elif isinstance(comp, Reply):
                     if str(getattr(comp, "sender_id", "")) == self_id:
                         return True
-            # 2. 唤醒前缀（如 /help 等指令）
-            if getattr(event, "message_str", ""):
+            # 2. 唤醒前缀（如 /help 等指令）。
+            #    waking_check 会在剥离前缀后重写 event.message_str，
+            #    而 event.message_obj.message_str 保留原始完整消息，
+            #    因此优先用原始文本检测，避免 /指令 被误判为未唤醒。
+            raw = getattr(event, "message_str", "") or ""
+            obj = getattr(event, "message_obj", None)
+            if obj is not None:
+                obj_raw = getattr(obj, "message_str", None)
+                if obj_raw:
+                    raw = obj_raw
+            if raw:
                 for prefix in self._wake_prefixes:
-                    if prefix and event.message_str.startswith(prefix):
+                    if prefix and raw.startswith(prefix):
                         return True
         except Exception as e:
             logger.error(f"真唤醒检测失败: {e}")
