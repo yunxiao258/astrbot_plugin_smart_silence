@@ -355,8 +355,11 @@ class SmartSilencePlugin(Star):
     def _save_stats(self):
         """保存统计到磁盘（失败则忽略）"""
         try:
-            with open(self.stats_path, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(self.stats_path) or ".", exist_ok=True)
+            tmp = self.stats_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.stats, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.stats_path)
         except Exception as e:
             logger.error(f"保存静默统计失败: {e}")
 
