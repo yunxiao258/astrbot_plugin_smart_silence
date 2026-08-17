@@ -62,7 +62,7 @@ class FakeEvent:
         self.self_id = self_id
         self.is_at_or_wake_command = at_o_wake
         self.group_id = group_id
-        self.is_admin = is_admin
+        self._is_admin = is_admin
         self.sender_id = sender_id
         self.extra = {}
         self.message_obj = message_obj
@@ -101,10 +101,13 @@ class FakeEvent:
     def stop_event(self):
         self.stopped = True
 
-    def is_administrator(self):
-        return self.is_admin
+    def is_admin(self):
+        return self._is_admin
 
     def set_result(self, result):
+        # 模拟真实框架：str 会被转换为 MessageEventResult（含 .chain）
+        if isinstance(result, str):
+            result = FakeResult([FakeComp(result)])
         self.result_chain = result
 
 

@@ -772,16 +772,16 @@ class SmartSilencePlugin(Star):
         return text.strip()
 
     def _is_administrator(self, event: AstrMessageEvent) -> bool:
-        """是否管理员（检测失败时放行，避免误锁）"""
+        """是否管理员（基于 event.is_admin()，失败时拒绝放行）"""
         try:
-            return bool(event.is_administrator())
+            return bool(event.is_admin())
         except Exception:
-            return True
+            return False
 
     def _reply(self, event: AstrMessageEvent, text: str):
-        """向事件设置回复内容"""
+        """向事件设置回复内容（使用 event.set_result 的字符串重载，避免裸 MessageChain 导致管道崩溃）"""
         try:
-            event.set_result(MessageChain([Plain(text)]))
+            event.set_result(text)
         except Exception as e:
             logger.error(f"静默命令输出失败: {e}")
 
