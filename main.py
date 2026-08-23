@@ -65,7 +65,7 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_smart_silence"
 PLUGIN_AUTHOR = "Administrator"
 PLUGIN_DESC = "让 LLM 根据上下文决定是否发言，避免机器人频繁回复刷屏"
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.7.0"
 
 # 事件 extra 中记录静默标记的键名
 EXTRA_SILENCE_KEY = "_smart_silence_marked"
@@ -285,7 +285,11 @@ class SmartSilencePlugin(Star):
         self.stats_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "stats.json"
         )
-        self.stats = {"total": 0, "today": 0, "date": "", "days": {}, "groups": {}}
+        # v1.7.0 起含沉默原因分布 reasons 与按群放行计数 passes
+        self.stats = {
+            "total": 0, "today": 0, "date": "", "days": {}, "groups": {},
+            "reasons": {}, "passes": {},
+        }
         self._load_stats()
         # 暂停截止时间戳（暂停期间不阻止不拦截不注入），从持久化恢复
         self.pause_until = None
@@ -363,8 +367,8 @@ class SmartSilencePlugin(Star):
         except Exception as e:
             logger.error(f"保存静默统计失败: {e}")
 
-    def _record_block(self, event: AstrMessageEvent):
-        """记录一次拦截（按群/按天累计）"""
+    def _record_block(self, event: AstrMessageEvent, reason: str = "other"):
+        """记录一次拦截（按群/按天累计 + 沉默原因分布）"""
         self.stats["total"] += 1
         today = date.today().isoformat()
         if self.stats.get("date") != today:
@@ -380,7 +384,33 @@ class SmartSilencePlugin(Star):
             pass
         groups = self.stats.setdefault("groups", {})
         groups[gid] = groups.get(gid, 0) + 1
+        reasons = self.stats.setdefault("reasons", {})
+        if isinstance(reasons, dict):
+            reasons[reason] = reasons.get(reason, 0) + 1
         self._save_stats()
+
+    def _record_pass(self, event: AstrMessageEvent):
+        """记录一次放行（消息进入 LLM 并产生回复，按群累计），失败不影响主流程"""
+        try:
+            gid = "private"
+            try:
+                gid = str(event.get_group_id() or gid)
+            except Exception:
+                pass
+            passes = self.stats.setdefault("passes", {})
+            if not isinstance(passes, dict):
+                passes = self.stats["passes"] = {}
+            passes[gid] = int(passes.get(gid, 0)) + 1
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"放行统计记录异常: {e}")
+
+    # 沉默原因中文说明
+    _REASON_LABELS = {
+        "hard_block": "未@未点名硬阻止",
+        "blacklist": "黑名单群严格静默",
+        "prefix": "静默前缀拦截",
+        "other": "其他",
+    }
 
     def _is_paused(self) -> bool:
         """是否处于暂停状态（到期自动恢复）"""
@@ -566,8 +596,8 @@ class SmartSilencePlugin(Star):
         if not self._is_real_wake(event):
             in_black = self._in_always_silent_group(event)
             if in_black:
-                # 黑名单群（严格静默）：未 @ 一律阻止，无论谁发的
-                self._stop_request(event)
+                # 黑名单群严格静默：未 @ 一律阻止，不管 LLM 说什么
+                self._stop_request(event, "blacklist")
                 return
             # 被其他插件明确标记为唤醒（伪唤醒，如提及/相关/指令触发词）时
             # 不硬阻止，交给 LLM 按 strict 指令克制判断，避免误伤指令类消息
@@ -603,13 +633,13 @@ class SmartSilencePlugin(Star):
         except Exception as e:
             logger.error(f"注入静默指令失败: {e}")
 
-    def _stop_request(self, event: AstrMessageEvent):
-        """阻止 LLM 调用并记录统计"""
+    def _stop_request(self, event: AstrMessageEvent, reason: str = "hard_block"):
+        """禁止 LLM 调用并记录统计"""
         try:
             event.stop_event()
         except Exception as e:
-            logger.error(f"阻止 LLM 调用失败: {e}")
-        self._record_block(event)
+            logger.error(f"停止 LLM 请求失败: {e}")
+        self._record_block(event, reason)
         logger.info("智能静默：未 @ 且未点名，已阻止 LLM 调用（不回复）")
 
     # ========== 钩子：LLM 响应后检测特殊前缀 ==========
@@ -624,6 +654,8 @@ class SmartSilencePlugin(Star):
         """当有 LLM 响应时，检测是否以特殊前缀开头"""
         if not self._cfg(event, "enable", self.enabled) or self._is_paused():
             return
+        # 进入 LLM 并产生回复 = 一次放行（发言率统计口径）
+        self._record_pass(event)
         if self._cfg(event, "only_group", self.only_group) and not self._is_group_chat(
             event
         ):
@@ -708,8 +740,8 @@ class SmartSilencePlugin(Star):
         if self._in_always_silent_group(event) and not (
             force_wake and self._is_real_wake(event)
         ):
-            # 黑名单群（严格静默）：未 @ 一律拦截，无论 LLM 说了什么
-            self._record_block(event)
+            # 黑名单群严格静默：未 @ 一律拦截，不管 LLM 说什么
+            self._record_block(event, "blacklist")
             event.clear_result()
             logger.info("智能静默：黑名单群未 @ 消息，已拦截 LLM 回复")
             return
@@ -758,9 +790,9 @@ class SmartSilencePlugin(Star):
                         logger.info("智能静默（发送前兜底）：已剥离静默前缀，正常回复正文")
 
         if is_silent:
-            # 清空结果，彻底阻止发送
+            # 最终拦截，阻止发送
             event.clear_result()
-            self._record_block(event)
+            self._record_block(event, "prefix")
             logger.info("智能静默：已拦截 LLM 回复，未发送消息")
 
     # ========== 命令：状态 / 暂停 / 恢复 ==========
@@ -821,6 +853,15 @@ class SmartSilencePlugin(Star):
                 self._resume()
                 self._reply(event, "【智能静默】已恢复，静默逻辑正常生效")
                 return
+
+        # 报表：本群发言率与沉默原因分布（管理员）
+        if arg == "报表":
+            if not self._is_administrator(event):
+                self._reply(event, "【智能静默】仅管理员可查看报表")
+                return
+            self._load_stats()
+            self._reply(event, self._report_text(event))
+            return
 
         # 默认：输出状态与统计
         self._load_stats()
@@ -885,7 +926,57 @@ class SmartSilencePlugin(Star):
             f"近7天: {trend}",
             f"拦截Top群: {top_lines}",
         ]
+        # 沉默原因分布摘要（前三）
+        reasons = self.stats.get("reasons") or {}
+        if isinstance(reasons, dict) and reasons:
+            ranked = sorted(
+                ((k, v) for k, v in reasons.items() if isinstance(v, (int, float))),
+                key=lambda kv: -kv[1],
+            )[:3]
+            summary = "、".join(
+                f"{self._REASON_LABELS.get(k, k)} {v} 次" for k, v in ranked
+            )
+            lines.append(f"沉默原因Top3: {summary}")
         self._reply(event, "\n".join(lines))
+
+    def _report_text(self, event: AstrMessageEvent) -> str:
+        """渲染本群发言率报表与沉默原因分布（v1.7.0）"""
+        gid = self._group_id(event)
+        passes = self.stats.get("passes") or {}
+        groups = self.stats.get("groups") or {}
+        passed = int(passes.get(gid, 0))
+        blocked = int(groups.get(gid, 0))
+        total = passed + blocked
+        lines = ["【智能静默】本群发言率报表"]
+        if total <= 0:
+            lines.append("📭 本群暂无统计数据")
+            return "\n".join(lines)
+        rate = passed / total * 100
+        lines.append(f"💬 进入 LLM 并回复: {passed} 次")
+        lines.append(f"🚫 被静默拦截: {blocked} 次")
+        bar_len = 20
+        filled = round(rate / 100 * bar_len)
+        bar = "█" * max(1, filled) if rate > 0 else "▁"
+        lines.append(f"📊 发言率: {rate:.1f}%")
+        lines.append(f"{'█' * 0}{bar}{'░' * (bar_len - len(bar))}")
+        # 沉默原因分布（全局）
+        reasons = self.stats.get("reasons") or {}
+        if isinstance(reasons, dict) and reasons:
+            total_reasons = sum(int(v) for v in reasons.values() if isinstance(v, (int, float)))
+            lines.append("")
+            lines.append(f"🔍 沉默原因分布（累计 {total_reasons} 次）")
+            ranked = sorted(
+                ((k, v) for k, v in reasons.items() if isinstance(v, (int, float))),
+                key=lambda kv: -kv[1],
+            )
+            for i, (key, cnt) in enumerate(ranked[:5]):
+                icon = ["🥇", "🥈", "🥉", "4.", "5."][i]
+                label = self._REASON_LABELS.get(key, key)
+                pct = cnt / total_reasons * 100 if total_reasons else 0
+                lines.append(f"{icon} {label}: {cnt} 次（{pct:.0f}%）")
+        lines.append("")
+        lines.append("ℹ️ 发言率 = 放行 / (放行 + 拦截)，按本群独立统计")
+        return "\n".join(lines)
 
     async def terminate(self):
         """插件卸载时清理"""
