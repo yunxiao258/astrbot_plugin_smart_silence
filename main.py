@@ -63,9 +63,9 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_smart_silence"
-PLUGIN_AUTHOR = "Administrator"
+PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "让 LLM 根据上下文决定是否发言，避免机器人频繁回复刷屏"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.7.1"
 
 # 事件 extra 中记录静默标记的键名
 EXTRA_SILENCE_KEY = "_smart_silence_marked"
@@ -168,6 +168,41 @@ def is_fallback_silent(text: str) -> bool:
     return any(p in head for p in FALLBACK_SILENT_PATTERNS)
 
 
+def _safe_bool(val, default: bool = True) -> bool:
+    """安全布尔转换，避免 WebUI/JSON 字符串 'false'/'0' 被 bool() 误判为 True"""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "on", "是"):
+            return True
+        if s in ("0", "false", "no", "off", "否", ""):
+            return False
+        return bool(default)
+    return bool(default)
+
+
+def _match_silence_prefix(text: str, prefix: str) -> tuple:
+    """匹配静默前缀（忽略前导空白、大小写与反引号包裹），返回 (matched, rest)"""
+    if not text or not prefix:
+        return False, (text or "").strip()
+    s = text.lstrip()
+    p_low = prefix.lower()
+    if s.lower().startswith(p_low):
+        return True, s[len(prefix):].strip()
+    if not prefix.startswith("`") and s.startswith("`"):
+        inner = s.lstrip("`").lstrip()
+        if inner.lower().startswith(p_low):
+            after = inner[len(prefix):]
+            if not after or after[0] in (
+                "`", " ", "\t", "\n", "\r", ":", "：", ",", "，", ".", "。", "!", "！"
+            ):
+                return True, after.lstrip("`").strip()
+    return False, s.strip()
+
+
 def decide_silence_action(
     text: str,
     prefix: str,
@@ -194,13 +229,12 @@ def decide_silence_action(
         return "silent", ""
     if not prefix:
         return "send", text
-    starts = text.startswith(prefix)
+    starts, rest = _match_silence_prefix(text, prefix)
     fallback_silent = not starts and is_fallback_silent(text)
     if not starts and not fallback_silent:
         return "send", text
     if force_reply_on_wake and is_wake:
         if starts:
-            rest = text[len(prefix):].strip()
             return ("strip" if rest else "silent"), rest
         # 被 @ 但整段回复为静默表达（无实质内容），视为空回复拦截
         return "silent", text
@@ -214,19 +248,21 @@ class SmartSilencePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
-        self.enabled = bool(self.config.get("enable", True))
-        self.only_group = bool(self.config.get("only_group", True))
+        self.enabled = _safe_bool(self.config.get("enable", True), True)
+        self.only_group = _safe_bool(self.config.get("only_group", True), True)
         self.silence_prefix = str(
             self.config.get("silence_prefix", "@silent")
         ).strip()
-        self.force_reply_on_wake = bool(self.config.get("force_reply_on_wake", True))
-        self.inject_prompt = bool(self.config.get("inject_prompt", True))
+        self.force_reply_on_wake = _safe_bool(
+            self.config.get("force_reply_on_wake", True), True
+        )
+        self.inject_prompt = _safe_bool(self.config.get("inject_prompt", True), True)
         self.custom_instruction = str(
             self.config.get("custom_instruction", "")
         ).strip()
         # 硬阻止：未 @ 且未点名时直接阻止 LLM 调用（完全不回复）
-        self.hard_block_unmentioned = bool(
-            self.config.get("hard_block_unmentioned", True)
+        self.hard_block_unmentioned = _safe_bool(
+            self.config.get("hard_block_unmentioned", True), True
         )
         # 机器人名字（用于点名检测），多个用英文逗号分隔
         self.bot_names = self._parse_group_list(self.config.get("bot_names", ""))
@@ -323,6 +359,11 @@ class SmartSilencePlugin(Star):
         v = self._v(event, key)
         return default if v is None else v
 
+    def _cfg_bool(self, event: AstrMessageEvent, key: str, default: bool) -> bool:
+        """按机器人安全获取布尔配置"""
+        v = self._v(event, key)
+        return _safe_bool(default, default) if v is None else _safe_bool(v, default)
+
     def _bot_accounts_for(self, event: AstrMessageEvent) -> set:
         """当前机器人视角下的“其他机器人账号”列表"""
         return self._parse_group_list(
@@ -390,7 +431,7 @@ class SmartSilencePlugin(Star):
         self._save_stats()
 
     def _record_pass(self, event: AstrMessageEvent):
-        """记录一次放行（消息进入 LLM 并产生回复，按群累计），失败不影响主流程"""
+        """记录一次放行（消息进入 LLM 并产生回复，按群累计），持久化防重加载覆盖"""
         try:
             gid = "private"
             try:
@@ -401,6 +442,7 @@ class SmartSilencePlugin(Star):
             if not isinstance(passes, dict):
                 passes = self.stats["passes"] = {}
             passes[gid] = int(passes.get(gid, 0)) + 1
+            self._save_stats()
         except Exception as e:  # noqa: BLE001
             logger.debug(f"放行统计记录异常: {e}")
 
@@ -569,13 +611,13 @@ class SmartSilencePlugin(Star):
         **kwargs,
     ) -> None:
         """当有 LLM 请求时，向系统提示词注入静默判断指令（或直接阻止未点名的请求）"""
-        enabled = self._cfg(event, "enable", self.enabled)
-        only_group = self._cfg(event, "only_group", self.only_group)
-        inject_prompt = self._cfg(event, "inject_prompt", self.inject_prompt)
-        force_wake = self._cfg(
+        enabled = self._cfg_bool(event, "enable", self.enabled)
+        only_group = self._cfg_bool(event, "only_group", self.only_group)
+        inject_prompt = self._cfg_bool(event, "inject_prompt", self.inject_prompt)
+        force_wake = self._cfg_bool(
             event, "force_reply_on_wake", self.force_reply_on_wake
         )
-        hard_block = self._cfg(
+        hard_block = self._cfg_bool(
             event, "hard_block_unmentioned", self.hard_block_unmentioned
         )
         if not enabled or self._is_paused():
@@ -652,11 +694,11 @@ class SmartSilencePlugin(Star):
         **kwargs,
     ) -> None:
         """当有 LLM 响应时，检测是否以特殊前缀开头"""
-        if not self._cfg(event, "enable", self.enabled) or self._is_paused():
+        if not self._cfg_bool(event, "enable", self.enabled) or self._is_paused():
             return
         # 进入 LLM 并产生回复 = 一次放行（发言率统计口径）
         self._record_pass(event)
-        if self._cfg(event, "only_group", self.only_group) and not self._is_group_chat(
+        if self._cfg_bool(event, "only_group", self.only_group) and not self._is_group_chat(
             event
         ):
             return
@@ -675,7 +717,7 @@ class SmartSilencePlugin(Star):
             prefix = str(
                 self._cfg(event, "silence_prefix", self.silence_prefix)
             ).strip()
-            force_wake = self._cfg(
+            force_wake = self._cfg_bool(
                 event, "force_reply_on_wake", self.force_reply_on_wake
             )
             stripped = text.strip()
@@ -698,7 +740,8 @@ class SmartSilencePlugin(Star):
                 return
             # silent：静默拦截
             event.set_extra(EXTRA_SILENCE_KEY, True)
-            if not stripped.startswith(prefix):
+            matched_prefix, _ = _match_silence_prefix(stripped, prefix)
+            if not matched_prefix:
                 logger.info(
                     f"智能静默：LLM 回复为自然语言静默表达，判定为静默，执行拦截: {stripped[:50]}"
                 )
@@ -725,17 +768,17 @@ class SmartSilencePlugin(Star):
         - 被 @ 但整段为静默表达 → 视为空回复拦截；
         - 白名单群 → 一律放行；黑名单群未 @ → 一律拦截。
         """
-        if not self._cfg(event, "enable", self.enabled) or self._is_paused():
+        if not self._cfg_bool(event, "enable", self.enabled) or self._is_paused():
             return
 
         if self._in_always_reply_group(event):
             # 白名单群（必回复）：不拦截任何回复（含前缀，由 LLM 正常输出）
             return
 
-        force_wake = self._cfg(
+        force_wake = self._cfg_bool(
             event, "force_reply_on_wake", self.force_reply_on_wake
         )
-        only_group = self._cfg(event, "only_group", self.only_group)
+        only_group = self._cfg_bool(event, "only_group", self.only_group)
 
         if self._in_always_silent_group(event) and not (
             force_wake and self._is_real_wake(event)
@@ -772,7 +815,8 @@ class SmartSilencePlugin(Star):
                     )
                     if action == "silent":
                         is_silent = True
-                        if joined.startswith(prefix):
+                        matched_prefix, _ = _match_silence_prefix(joined, prefix)
+                        if matched_prefix:
                             logger.info(
                                 f"智能静默（发送前兜底）：LLM 回复以 {prefix} 开头，执行拦截"
                             )
@@ -829,6 +873,35 @@ class SmartSilencePlugin(Star):
         """/静默 [状态]：查看状态与统计；/静默 暂停 [N]：暂停 N 分钟（默认 30）；/静默 恢复"""
         arg = self._command_arg(event)
 
+        # 帮助指令
+        if arg in ("帮助", "help", "?"):
+            self._reply(
+                event,
+                f"【智能静默 v{PLUGIN_VERSION}】可用指令：\n"
+                "- /静默 [状态]：查看运行状态、趋势与沉默原因 Top3\n"
+                "- /静默 报表：查看本群发言率报表（管理员）\n"
+                "- /静默 暂停 [分钟]：临时暂停静默功能（默认 30 分钟，管理员）\n"
+                "- /静默 恢复：立即恢复静默功能（管理员）\n"
+                "- /静默 清空：清空累计拦截与放行统计（管理员）\n"
+                "- /静默 帮助：显示本帮助",
+            )
+            return
+
+        # 清空统计（管理员）
+        if arg in ("清空", "重置", "clear", "reset"):
+            if not self._is_administrator(event):
+                self._reply(event, "【智能静默】仅管理员可清空统计")
+                return
+            self.stats = {
+                "total": 0, "today": 0, "date": date.today().isoformat(),
+                "days": {}, "groups": {}, "reasons": {}, "passes": {},
+            }
+            if self.pause_until is not None:
+                self.stats["pause_until"] = self.pause_until
+            self._save_stats()
+            self._reply(event, "【智能静默】已清空统计数据")
+            return
+
         # 暂停 / 恢复 需要管理员权限
         if arg.startswith("暂停") or arg == "恢复":
             if not self._is_administrator(event):
@@ -839,7 +912,7 @@ class SmartSilencePlugin(Star):
                 minutes = 30.0
                 if rest:
                     try:
-                        minutes = float(rest)
+                        minutes = max(1.0, float(rest))
                     except ValueError:
                         minutes = 30.0
                 self._pause(minutes)
@@ -888,10 +961,10 @@ class SmartSilencePlugin(Star):
         except Exception:
             self_id = "?"
         ev = {
-            "enable": self._cfg(event, "enable", self.enabled),
-            "only_group": self._cfg(event, "only_group", self.only_group),
+            "enable": self._cfg_bool(event, "enable", self.enabled),
+            "only_group": self._cfg_bool(event, "only_group", self.only_group),
             "prefix": self._cfg(event, "silence_prefix", self.silence_prefix),
-            "force_wake": self._cfg(
+            "force_wake": self._cfg_bool(
                 event, "force_reply_on_wake", self.force_reply_on_wake
             ),
             "wlist": len(
@@ -911,7 +984,7 @@ class SmartSilencePlugin(Star):
             "bot_accounts": len(self._bot_accounts_for(event)),
         }
         lines = [
-            "【智能静默】运行状态",
+            f"【智能静默 v{PLUGIN_VERSION}】运行状态",
             f"机器人(self_id): {self_id}",
             f"启用: {'是' if ev['enable'] else '否'}",
             f"仅群聊生效: {'是' if ev['only_group'] else '否'}",
@@ -979,8 +1052,9 @@ class SmartSilencePlugin(Star):
         return "\n".join(lines)
 
     async def terminate(self):
-        """插件卸载时清理"""
+        """插件卸载时持久化统计并清理"""
         try:
+            self._save_stats()
             logger.info(f"【{PLUGIN_NAME}】插件已卸载")
         except Exception:
             pass

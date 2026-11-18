@@ -7,9 +7,11 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, r"D:\astrbot\data\plugins\astrbot_plugin_smart_silence")
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PLUGIN_DIR)
+sys.path.insert(0, os.path.dirname(_PLUGIN_DIR))
 
+from main import _match_silence_prefix, decide_silence_action  # noqa: E402
 from test_smart_silence import FakeEvent, FakeResponse, make_plugin  # noqa: E402
 
 
@@ -127,6 +129,49 @@ class TestReportCommand(unittest.TestCase):
         )
         self.assertIn("沉默原因Top3", rendered)
         self.assertIn("硬阻止 3 次", rendered)
+
+
+class TestV171FixesAndCommands(unittest.TestCase):
+    def test_case_insensitive_and_backtick_prefix(self):
+        self.assertEqual(decide_silence_action("@SILENT", "@silent", False, True)[0], "silent")
+        self.assertEqual(decide_silence_action("  `@silent`", "@silent", False, True)[0], "silent")
+        action, rest = decide_silence_action("`@SILENT` 好的", "@silent", True, True)
+        self.assertEqual((action, rest), ("strip", "好的"))
+        matched, _ = _match_silence_prefix("`@silent_var` 是变量", "@silent")
+        self.assertFalse(matched)
+
+    def test_string_false_config_not_truthy(self):
+        p = make_plugin(enable="false", hard_block_unmentioned="0", per_bot_config='{"20002": {"enable": "false"}}')
+        self.assertFalse(p.enabled)
+        self.assertFalse(p.hard_block_unmentioned)
+        ev = FakeEvent(self_id="20002", group_id="101", message_str="hi")
+        self.assertFalse(p._cfg_bool(ev, "enable", True))
+
+    def test_pass_persisted_before_report(self):
+        p = make_plugin()
+        p._record_pass(FakeEvent(group_id="g9"))
+        p._record_pass(FakeEvent(group_id="g9"))
+        ev = FakeEvent(group_id="g9", message_str="/静默 报表", is_admin=True)
+        run(p.silence_cmd(ev))
+        rendered = "".join(c.text for c in ev.result_chain.chain if hasattr(c, "text"))
+        self.assertIn("进入 LLM 并回复: 2 次", rendered)
+
+    def test_help_clear_and_terminate(self):
+        p = make_plugin()
+        ev_help = FakeEvent(group_id="g9", message_str="/静默 帮助")
+        run(p.silence_cmd(ev_help))
+        help_txt = "".join(c.text for c in ev_help.result_chain.chain if hasattr(c, "text"))
+        self.assertIn("可用指令", help_txt)
+        p._record_block(FakeEvent(group_id="g9"), "hard_block")
+        p._pause(10)
+        ev_nonadmin = FakeEvent(group_id="g9", message_str="/静默 清空", is_admin=False)
+        run(p.silence_cmd(ev_nonadmin))
+        self.assertEqual(p.stats["total"], 1)
+        ev_clear = FakeEvent(group_id="g9", message_str="/静默 清空", is_admin=True)
+        run(p.silence_cmd(ev_clear))
+        self.assertEqual(p.stats["total"], 0)
+        self.assertIsNotNone(p.pause_until)
+        run(p.terminate())
 
 
 if __name__ == "__main__":

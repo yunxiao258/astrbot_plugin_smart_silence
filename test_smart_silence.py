@@ -1,7 +1,7 @@
 """astrbot_plugin_smart_silence 单元测试
 
-运行方式（在插件目录下，使用 AstrBot 自带 Python 环境）：
-    D:\\uv-tools\\astrbot\\Scripts\\python.exe -m unittest test_smart_silence -v
+运行方式（在插件目录下运行）：
+    python -m unittest test_smart_silence -v
 """
 
 import asyncio
