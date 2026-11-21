@@ -65,7 +65,12 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_smart_silence"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "让 LLM 根据上下文决定是否发言，避免机器人频繁回复刷屏"
-PLUGIN_VERSION = "1.7.1"
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+
+PLUGIN_VERSION = "1.8.0"
 
 # 事件 extra 中记录静默标记的键名
 EXTRA_SILENCE_KEY = "_smart_silence_marked"
@@ -243,6 +248,7 @@ def decide_silence_action(
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class SmartSilencePlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     """智能静默插件"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -365,10 +371,10 @@ class SmartSilencePlugin(Star):
         return _safe_bool(default, default) if v is None else _safe_bool(v, default)
 
     def _bot_accounts_for(self, event: AstrMessageEvent) -> set:
-        """当前机器人视角下的“其他机器人账号”列表"""
-        return self._parse_group_list(
-            self._cfg(event, "bot_accounts", self.bot_accounts)
-        )
+        """当前机器人视角下的“其他机器人账号”列表（含中枢共享 Bot 名单）"""
+        base = self._parse_group_list(self._cfg(event, "bot_accounts", self.bot_accounts))
+        extra = getattr(self, "_hub_extra_bots", set())
+        return base | set(extra)
 
     def _is_bot_message(self, event: AstrMessageEvent) -> bool:
         """消息发送者是否为配置的其他机器人账号"""
@@ -425,6 +431,7 @@ class SmartSilencePlugin(Star):
             pass
         groups = self.stats.setdefault("groups", {})
         groups[gid] = groups.get(gid, 0) + 1
+        emit_hub_event(PLUGIN_NAME, "smart_silence.silenced", {"group_id": gid, "reason": reason}, self.context)
         reasons = self.stats.setdefault("reasons", {})
         if isinstance(reasons, dict):
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -1058,3 +1065,25 @@ class SmartSilencePlugin(Star):
             logger.info(f"【{PLUGIN_NAME}】插件已卸载")
         except Exception:
             pass
+
+    def hub_status(self) -> dict:
+        return {
+            "version": PLUGIN_VERSION,
+            "status": "online",
+            "metrics": {"累计静默": int(self.stats.get("total", 0)), "今日静默": int(self.stats.get("today", 0)), "共享Bot数": len(getattr(self, "_hub_extra_bots", set()))},
+            "actions": ["get_stats", "sync_bot_ids"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        p = params or {}
+        if action == "get_stats":
+            return {"ok": True, "data": dict(self.stats)}
+        if action == "sync_bot_ids":
+            ids = [str(x).strip() for x in (p.get("bot_ids") or []) if str(x).strip()]
+            if p.get("bot_id"):
+                ids.append(str(p["bot_id"]).strip())
+            if not hasattr(self, "_hub_extra_bots"):
+                self._hub_extra_bots = set()
+            self._hub_extra_bots.update(ids)
+            return {"ok": True, "data": {"synced_bots": sorted(self._hub_extra_bots)}}
+        return {"ok": False, "error": f"不支持的动作：{action}"}
